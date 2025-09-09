@@ -1,0 +1,136 @@
+# Home Power Monitor – Sandbox Telemetry
+
+This sandbox generates a continuous NDJSON (newline-delimited JSON) stream of power
+frames, suitable for driving a UI in real time.
+
+Each line in the log is **one frame** of telemetry (~4 frames/sec).
+
+---
+
+## System Context
+
+The sandbox simulates a **residential electrical panel monitor**:
+
+- **Voltage sensing**: taken from a potential divider / isolation board tied across the mains.  
+- **Current sensing**: measured via CT (current transformer) clamped around a line conductor.  
+- **Derived quantities**: all RMS values, power, factor, and harmonic content are computed as
+  they would be from those sensor signals.  
+- **Events**: step changes in current draw represent appliances turning on/off inside the panel.  
+- **Sample rate**: 4096 Hz is fast enough to capture harmonics up to ~2 kHz, which covers
+  standard power quality diagnostics.
+
+### Safety Considerations
+- In practice, the ESP32 must be isolated from mains using CTs (current) and an isolated PT or
+  divider circuit (voltage).  
+- All hardware interfacing must comply with safe low-voltage practices — the sandbox assumes
+  safe conditioning has already occurred.
+
+### Extensibility
+- **Multi-phase panels**: add `"phase": "L1" | "L2" | "N"` or a `chan_id` field to frames.
+- **Additional channels**: schema supports extension without breaking existing keys.
+- **Error handling**: health flags (`fft_ok`, `sync_ok`, `adc_ok`) provide hooks for signaling
+  hardware/firmware faults.
+
+---
+
+## Frame Structure
+
+See [Frame Structure](#frame-structure) below for the full JSON layout.
+
+---
+
+## Typical Values (Sim)
+
+- **OFF state**  
+  - Irms ≈ 3.0 A, P ≈ 312 W, THD ≈ 5%, `state="off"`.  
+- **ON state**  
+  - Irms ≈ 6.0 A, P ≈ 624 W, THD ≈ 12%, `state="on"`.  
+- **Transitions**  
+  - Deltas spike (`d_irms ≈ 3.0`, `d_p ≈ 312`), event object logged.
+
+---
+
+## Invariants (for validation)
+
+- \( p ≈ v1\_rms \cdot i1\_rms \cdot \cos(\phi) \)  
+- \( s = rms\_v \cdot rms\_i \)  
+- \( pf\_true = p/s \le pf\_disp = \cos(\phi) \)  
+- \( rms\_i ≈ i1\_rms \cdot \sqrt{1 + thd\_i^2} \)
+
+---
+
+## Stream Format
+
+- **Transport**: file (`data/fixtures/sim.ndjson`) and stdout.  
+- **Cadence**: ~4 Hz (every 250 ms).  
+- **Format**: NDJSON — one JSON object per line.
+
+---
+
+## Usage
+
+- Parse as a stream of JSON objects.  
+- Plot `p`, `rms_i`, `thd_i`, `pf_true` over time.  
+- Show `state` and `events` on a timeline.  
+- Bar-chart `h_i` harmonics.  
+- Display health flags in footer.  
+- Use `fw` + `cal_id` for provenance.
+
+## Frame Structure
+
+Every frame contains:
+
+```jsonc
+{
+  "schema": 1,                        // schema version
+  "delta_convention": "current_minus_previous",
+  "h_i_units": "relative_to_fundamental",
+
+  "t": 1757304208829,                 // ms epoch timestamp
+  "frame_id": 20,                     // incrementing counter
+  "fs": 4096,                         // Hz sample rate
+  "N": 1024,                          // samples per frame
+  "window": "hann",                   // analysis window
+  "freq_hz": 60.0,                    // nominal line frequency
+
+  // --- Core power metrics ---
+  "rms_v": 120.0,                     // V
+  "rms_i": 6.043,                     // A
+  "p": 623.538,                       // W (true power)
+  "s": 725.165,                       // VA (apparent power, rms)
+  "pf_true": 0.860,                   // p/s (includes distortion)
+
+  // --- Fundamental / phasor metrics ---
+  "v1_rms": 120.0,                    // V1 rms
+  "i1_rms": 6.0,                      // I1 rms
+  "phi_deg": 30.0,                    // deg, V1∠ – I1∠
+  "phi_convention": "phi = angle(V1) - angle(I1); positive = current lags",
+  "p1": 623.538,                      // W, fundamental real
+  "q1": 360.0,                        // var, fundamental reactive
+  "s1": 720.0,                        // VA, fundamental apparent
+  "pf_disp": 0.866,                   // cos(phi)
+
+  // --- Distortion features ---
+  "thd_i": 0.12,                      // total harmonic distortion (I)
+  "thd_v": 0.01,                      // THD(V), fixed in sim
+  "h_i": { "120": 0.12, "180": 0.0 }, // harmonic ratios rel. to I1
+  "odd_sum_i": 0.0,
+  "even_sum_i": 0.12,
+  "crest_i": 1.512,
+  "form_i": 1.117,
+
+  // --- State & events ---
+  "state": "on",                      // "on" | "off"
+  "d_irms": 3.039,                    // Irms delta vs. prev frame
+  "d_p": 311.769,                     // P delta vs. prev frame
+  "events": [{ "type": "on", "t": 1757304208829 }],
+
+  // --- Health flags ---
+  "fft_ok": true,
+  "sync_ok": true,
+  "adc_ok": true,
+
+  // --- Metadata ---
+  "fw": "sandbox-0.2.1",
+  "cal_id": "sim-default"
+}
